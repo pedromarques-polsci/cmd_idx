@@ -1,14 +1,14 @@
 # Packages --------------------------------------------------------------
-if(require(comtradr) == F) install.packages('comtradr'); require(comtradr)
-if(require(concordance) == F) install.packages('concordance'); require(concordance)
-if(require(countrycode) == F) install.packages('countrycode'); require(countrycode)
-if(require(dplyr) == F) install.packages('dplyr'); require(dplyr)
-if(require(ggplot2) == F) install.packages('ggplot2'); require(ggplot2)
-if(require(haven) == F) install.packages('haven'); require(haven)
-if(require(readxl) == F) install.packages('readxl'); require(readxl)
-if(require(tidyverse) == F) install.packages('tidyverse'); require(tidyverse)
-if(require(xts) == F) install.packages('xts'); require(xts)
-if(require(zoo) == F) install.packages('zoo'); require(zoo)
+library(comtradr)
+library(concordance)
+library(countrycode)
+library(ggplot2)
+library(haven)
+library(janitor)
+library(readxl)
+library(tidyverse)
+library(xts)
+library(zoo)
 
 # Potential conflicts
 # dplyr::filter(), Hmisc::sumarize()
@@ -18,7 +18,8 @@ if(require(zoo) == F) install.packages('zoo'); require(zoo)
 # The first one builds our commodity price dataset by aggregating three sources.
 # The second part extracts commodity trade data directly from UN Comtrade
 # dataset through its API.
-# The final one ties the previous databases together and builds up a Terms of Trade Index inspired by Gruss and Kebhaj's (2019) methodology,
+# The final one ties the previous databases together and builds up a Terms of 
+# Trade Index inspired by Gruss and Kebhaj's (2019) methodology,
 # although our index has some minor, yet important differences.
 # The current version of this code is 19/03/2024 13:52
 
@@ -28,12 +29,14 @@ commodity_code <- read_xlsx('raw_data/commodity_codes.xlsx', sheet = 1, skip = 1
   rename('commodity' = 1,
          'price_code' = 2)
 
+# It's better work with a index than grepl, 
+# since each of their location match the corresponding commodity
 index <- 1:nrow(commodity_code)
 
 commodity_code <- commodity_code %>%
   mutate(id = index) %>%
   relocate(id) %>%
-  filter(!id %in% c(90, 96, 98:100, 103:106, 109, 111))
+  filter(!id %in% c(90, 96, 98:100, 103:106, 109, 111)) # duplicates
 
 commodity_code[commodity_code$id == '23', 'commodity'] <- 'Hard Logs'
 commodity_code[commodity_code$id == '26', 'commodity'] <- 'Soft Logs'
@@ -63,12 +66,13 @@ commodity_prices <- commodity_prices %>%
   relocate(id) %>%
   filter(!id %in% c(90, 96, 98:100, 103:106, 109, 111))
 
+# One cannot use grepl here, that's why working of an index is better
 commodity_prices[commodity_prices$id == '23', 'commodity'] <- 'Hard Logs'
 commodity_prices[commodity_prices$id == '26', 'commodity'] <- 'Soft Logs'
 commodity_prices[commodity_prices$id == '24', 'commodity'] <- 'Hard Sawn'
 commodity_prices[commodity_prices$id == '27', 'commodity'] <- 'Soft Sawn'
 
-commodity_prices <- commodity_prices %>%
+commodity_bind <- commodity_prices %>%
   left_join(commodity_code) %>%
   left_join(commodity_full) %>%
   relocate(id, commodity, price_code, fullname) %>%
@@ -76,24 +80,25 @@ commodity_prices <- commodity_prices %>%
                names_to = 'year',
                values_to = 'cmd_price')
 
-# We aggregate wood prices, given that trade data does not discriminate between Soft/Hard Sawnwood/Logs
-wood <- commodity_prices %>% 
-  filter(price_code == 'PTIMB') %>% 
+# We aggregate wood prices, given that trade data does not discriminate 
+# between Soft/Hard Sawnwood/Logs
+
+wood <- commodity_bind %>% 
+  filter(price_code == 'PTIMB') %>% # PTIMB is just a vessel
   mutate(price_code = 'PWMEAN',
          fullname = 'Wood Prices Mean (Soft/Hard Sawnwood, Soft/Hard Logs',
          commodity = 'Wood')
   
-
-logsk <- commodity_prices %>% 
+logsk <- commodity_bind %>% 
   filter(price_code == 'PLOGSK')
 
-sawmal <- commodity_prices %>% 
+sawmal <- commodity_bind %>% 
   filter(price_code == 'PSAWMAL')
 
-logore <- commodity_prices %>% 
+logore <- commodity_bind %>% 
   filter(price_code == 'PLOGORE')
 
-sawore <- commodity_prices %>% 
+sawore <- commodity_bind %>% 
   filter(price_code == 'PSAWORE')
 
 # The aggregation is done by taking the mean price
@@ -101,18 +106,16 @@ for (i in 1:34) {
   wood[i,6] <- (logsk[i,6] + sawmal[i,6] + logore[i,6] + sawore[i,6])/4
 }
 
-commodity_prices <- commodity_prices %>% bind_rows(wood)
+commodity_price_df <- commodity_bind %>% bind_rows(wood)
 
 ## 1.2 Source - UNCTAD -----------------------------------------------------
-unctad_prices <- read_xlsx('raw_data/unctad_commodity_prices.xlsx') %>%
-  rename('year' = 1,
-         'price_code' = 2,
-         'fullname' = 3,
-         'cmd_price' = 4) %>%
-  select(-5, -6) %>% 
-  mutate(year = as.character(year),
-         cmd_price = as.double(cmd_price)) %>% 
-  filter(price_code == "240100.01")
+unctad_prices <- read_csv('raw_data/unctad_commodity_prices.csv') %>% 
+  clean_names() %>% 
+  pivot_longer(cols = !commodity_label,
+               names_to = "year", values_to = "cmd_price") %>% 
+  filter(grepl("Tobacco", commodity_label)) %>% 
+  mutate(year = str_extract(year, "[0-9]+")) %>% 
+  rename(fullname = commodity_label)
 
 ## 1.3 Source - FRED -----------------------------------------------------------
 orange_prices <- read_xlsx('raw_data/fred_orange_prices.xlsx', sheet = 1, skip = 10) %>%
@@ -124,21 +127,21 @@ orange_prices <- read_xlsx('raw_data/fred_orange_prices.xlsx', sheet = 1, skip =
          fullname = 'U.S. Dollars per Pound')
 
 ## 1.4 Joining both datasets -----------------------------------------------
-commodity_prices <- commodity_prices %>%
+commodity_prices_final <- commodity_price_df %>%
   bind_rows(unctad_prices, orange_prices)
 
-commodity_prices[commodity_prices$price_code == '240100.01', 'price_code'] <- 'PTOBAC'
-commodity_prices[commodity_prices$price_code == 'PTOBAC', 'id'] <- 111
-commodity_prices[commodity_prices$price_code == 'PTOBAC', 'commodity'] <- 'Tobacco'
-commodity_prices[commodity_prices$price_code == 'PORANGUSDM', 'id'] <- 112
+commodity_prices_final[commodity_prices_final$price_code == '240100.01', 'price_code'] <- 'PTOBAC'
+commodity_prices_final[commodity_prices_final$price_code == 'PTOBAC', 'id'] <- 111
+commodity_prices_final[commodity_prices_final$price_code == 'PTOBAC', 'commodity'] <- 'Tobacco'
+commodity_prices_final[commodity_prices_final$price_code == 'PORANGUSDM', 'id'] <- 112
 
-commodity_prices <- commodity_prices %>% 
+commodity_prices_final_df <- commodity_prices_final %>% 
   mutate(year = as.numeric(year))
 
 ## 1.5 Exporting prices dataset --------------------------------------------
-saveRDS(commodity_prices, "final_data/commodity_prices.RDS")
-write_excel_csv2(commodity_prices, "final_data/commodity_prices.csv", na = '')
-# write_dta(commodity_prices, "final_data/commodity_prices.dta")
+saveRDS(commodity_prices_final_df, "final_data/commodity_prices_final_df.RDS")
+write_excel_csv2(commodity_prices, "final_data/commodity_prices_final_df.csv", 
+                 na = '')
 
 # 2. COMMODITY TRADE  ------------------------------------------------------
 # Harmonized Commodity Description and Coding System

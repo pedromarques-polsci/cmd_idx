@@ -2,16 +2,15 @@
 install.packages("devtools")
 devtools::install_github("ropensci/comtradr@dev")
 
-if(require(comtradr) == F) install.packages('comtradr'); require(comtradr)
-if(require(concordance) == F) install.packages('concordance'); require(concordance)
-if(require(countrycode) == F) install.packages('countrycode'); require(countrycode)
-if(require(dplyr) == F) install.packages('dplyr'); require(dplyr)
-if(require(ggplot2) == F) install.packages('ggplot2'); require(ggplot2)
-if(require(haven) == F) install.packages('haven'); require(haven)
-if(require(readxl) == F) install.packages('readxl'); require(readxl)
-if(require(tidyverse) == F) install.packages('tidyverse'); require(tidyverse)
-if(require(xts) == F) install.packages('xts'); require(xts)
-if(require(zoo) == F) install.packages('zoo'); require(zoo)
+library(comtradr)
+library(concordance)
+library(countrycode)
+library(ggplot2)
+library(haven)
+library(readxl)
+library(tidyverse)
+library(xts)
+library(zoo)
 
 # 1. Commodity Trade Data -------------------------------------------------
 ## 1.1 Set Up -------------------------------------------------------------
@@ -73,7 +72,8 @@ latam_iso <- readRDS('final_data/db_socialx_pcp.RDS') %>%
  unique()
  
 ## 2.2 Bilateral Trade -----------------------------------------------------
-# Since I don't have a premium subscription myself, I had to partition my code in several lines in order to circumvent quota limits
+# Since I don't have a premium subscription myself, 
+# I had to partition my code in several lines in order to circumvent quota limits
 
 bi_trade_arg <- map(1988:2020, ~get_data("all", "ARG", .x)) %>% list_rbind()
 bi_trade_bhs <- map(1988:2020, ~get_data("all", "BHS", .x)) %>% list_rbind()
@@ -172,13 +172,13 @@ all_bi_trade %>%
   saveRDS("raw_data/all_bi_trade.RDS")
 
 # 3. Data transformation ----------------------------------------
-latam_iso <- readRDS('raw_data/latam_iso.RDS') %>% 
-  filter(!iso3c %in% c('BHS', 'BRB', 'JAM', 'TTO'))
+latam_iso <- readRDS('raw_data/latam_iso.RDS')
 
 ## 3.1 All Trade -----------------------------------------------------
-all_trade <- readRDS("raw_data/all_trade.RDS")
-
-all_trade <- all_trade %>% select(reporterISO, reporterDesc, partnerISO, partnerDesc, period, flowCode, cmdCode, cmdDesc, primaryValue) %>% 
+all_trade <- readRDS("raw_data/all_trade.RDS") %>% 
+  select(reporterISO, reporterDesc, partnerISO, 
+         partnerDesc, period, flowCode, cmdCode, 
+         cmdDesc, primaryValue) %>% 
   mutate(period = as.numeric(period))
 
 ### Verifying implicit missings
@@ -196,34 +196,45 @@ all_trade_complete %>%
   group_by(reporterISO) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% View()
 
-all_trade_complete %>% 
+gg_original <- all_trade_complete %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(period) %>% 
+  group_by(period, flowCode) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
-  ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Base original") +
+  ggplot(aes(x=period, y=sum_total_na, group = flowCode)) + 
+  ggtitle("Base original") +
   xlab('Ano') + ylab('Missings') +
   theme_classic() +
-  geom_line(linetype = 'dashed') +
+  geom_line(aes(linetype = flowCode)) +
   geom_point()
 
-all_trade_complete %>% 
+gg_original
+
+missingness <- all_trade_complete %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(period, reporterISO) %>% 
-  summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
+  group_by(period, reporterISO, flowCode) %>% 
+  summarise(sum_total_na = sum(is.na(primaryValue))) 
+
+gg_original_iso3c <- missingness %>% 
   ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Base original") +
-  facet_wrap(~factor(reporterISO, levels=c(unique(reporterISO))), drop = T, ncol = 4, scales = "free_y") +
+  facet_wrap(~factor(reporterISO, levels=c(unique(reporterISO))), 
+             drop = T, ncol = 4, scales = "free_y") +
   xlab('Ano') + ylab('Missings') +
   theme_minimal() +
-  geom_line(linewidth = 0.8) +
+  geom_line(linewidth = 0.8, aes(linetype = flowCode)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+gg_original_iso3c
 
 ## 3.2 Bilateral Trade imputation --------------------------------------------
 
 ## 3.2.1 Aggregating bilateral trade -----------------------------------------
 all_bi_trade <- readRDS("raw_data/all_bi_trade.RDS")
 
+# Example, all exports to partner BRA is all BRA's imports
+# All imports from partner BRA is all BRA's exports
 all_bi_trade_agg <- all_bi_trade %>% 
-  select(reporterISO, reporterDesc, partnerISO, partnerDesc, period, flowCode, cmdCode, cmdDesc, primaryValue) %>% 
+  select(reporterISO, reporterDesc, partnerISO, partnerDesc, period, 
+         flowCode, cmdCode, cmdDesc, primaryValue) %>% 
   group_by(period, flowCode, cmdCode, partnerISO) %>% 
   reframe(primaryValue = sum(primaryValue)) %>% 
   mutate(period = as.numeric(period)) %>% 
@@ -236,65 +247,68 @@ complete_bi_trade_agg <- all_bi_trade_agg %>%
   complete(period = 1988:2020, flowCode, cmdCode, reporterISO)
 
 ### 3.2.1 Imputation ---------------------------------------------------------
-all_trade_complete <- all_trade_complete %>% 
-  full_join(all_bi_trade_agg, join_by(cmdCode, flowCode, period, reporterISO)) %>%
+all_trade_first_imput <- all_trade_complete %>% 
+  full_join(all_bi_trade_agg, join_by(cmdCode, flowCode, 
+                                      period, reporterISO)) %>%
   mutate(primaryValue = coalesce(primaryValue.x, primaryValue.y),
          partnerISO = 'W00',
          partnerDesc = "World") %>% 
-  select(-primaryValue.x, -primaryValue.y)
-
-all_trade_complete <- all_trade_complete %>% 
+  select(-primaryValue.x, -primaryValue.y) %>% 
   group_by(reporterISO) %>% 
-  fill(reporterDesc, .direction = "updown")
-
-all_trade_complete <- all_trade_complete %>% 
+  fill(reporterDesc, .direction = "updown") %>% 
   group_by(cmdCode) %>% 
-  fill(cmdDesc, .direction = "updown")
+  fill(cmdDesc, .direction = "updown") %>% 
+  ungroup()
 
 ### 3.2.3 Missing counts--------------------------------------------------
 #### Missings per country
-all_trade_complete %>% 
+all_trade_first_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
   group_by(reporterISO) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
   View()
 
-all_trade_complete %>% 
+gg_first_imput <- all_trade_first_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(period) %>% 
+  group_by(period, flowCode) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
   ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Primeira Imputação") +
   xlab('Ano') + ylab('Missings') +
   theme_classic() +
-  geom_line(linetype = 'dashed') +
-  geom_point()
+  geom_line(aes(linetype = flowCode)) +
+  geom_point() +
+  scale_x_continuous(breaks = round(seq(1980, 2020, by = 1),1))
 
-all_trade_complete %>% 
+gg_first_imput
+
+gg_first_imput_iso3c <- all_trade_first_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(period, reporterISO) %>% 
+  group_by(period, reporterISO, flowCode) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
   ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Primeira Imputação") +
   facet_wrap(~factor(reporterISO, levels=c(unique(reporterISO))), drop = T, ncol = 4, scales = "free_y") +
   xlab('Ano') + ylab('Missings') +
   theme_minimal() +
-  geom_line(linewidth = 0.8) +
+  geom_line(linewidth = 0.8, aes(linetype = flowCode)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+gg_first_imput_iso3c
 
 ## 3.3 Zero imputation -----------------------------------------------------
 ### 3.3.1 Identifying full missing commodities -----------------------------
-fill_cmd_missing_x <- all_trade_complete %>% 
+fill_cmd_missing_x <- all_trade_first_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c,
          flowCode == "X") %>% 
   group_by(reporterISO, cmdCode, period) %>% 
   summarise(sum_x_na = sum(is.na(primaryValue)))
 
-fill_cmd_missing_m <- all_trade_complete %>% 
+fill_cmd_missing_m <- all_trade_first_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c,
          flowCode == "M") %>% 
   group_by(reporterISO, cmdCode, period) %>% 
   summarise(sum_m_na = sum(is.na(primaryValue)))
 
-fill_cmd_missing <- all_trade_complete %>%
+fill_cmd_missing <- all_trade_first_imput %>%
   filter(reporterISO %in% latam_iso$iso3c) %>% 
   group_by(reporterISO, cmdCode, period) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
@@ -306,12 +320,15 @@ fill_cmd_missing <- fill_cmd_missing %>%
   left_join(all_trade_complete %>% select(cmdCode, cmdDesc) %>% 
               distinct(cmdCode, .keep_all = T))
 
+# Constante = a commodity is consistently missing or not missing in the
+# entire period
+# Variavel = a commodity can be either missing or not missing
 no_exports <- fill_cmd_missing %>% 
   dplyr::mutate(
     .by = c(reporterISO, cmdCode),
     constant = ifelse(max(sum_x_na) - min(sum_x_na) == 0, "constante", "variavel")
   ) %>% 
-  filter(constant == "constante", sum_x_na == 1)
+  filter(constant == "constante", sum_x_na == 1) # Missing in the entire period
 
 no_imports <- fill_cmd_missing %>% 
   dplyr::mutate(
@@ -320,14 +337,18 @@ no_imports <- fill_cmd_missing %>%
   ) %>% 
   filter(constant == "constante", sum_m_na == 1)
 
+# For all trade
 no_trade <- fill_cmd_missing %>% 
   dplyr::mutate(
     .by = c(reporterISO, cmdCode),
-    constant = ifelse(max(sum_total_na) - min(sum_total_na) == 0, "constante", "variavel")
+    constant = ifelse(max(sum_total_na) - min(sum_total_na) == 0, "constante", 
+                      "variavel")
   ) %>% 
   filter(constant == "constante", sum_total_na == 2)
 
 ### 3.3.2 Imputing zeroes -----------------------------------------------------
+# If there is absolute no data for a certain commodity, one can assume
+# that country does not import or export that commodity
 x_zero <- no_exports %>% 
   select(-sum_total_na, -sum_m_na, -sum_x_na, -constant) %>% 
   mutate(primaryValue = 0,
@@ -338,15 +359,13 @@ m_zero <- no_imports %>%
   mutate(primaryValue = 0,
          flowCode = "M")
 
-all_trade_complete_two <- all_trade_complete %>% 
+all_trade_second_imput <- all_trade_first_imput %>% 
   full_join(x_zero, join_by(cmdCode, flowCode, period, reporterISO)) %>%
   mutate(primaryValue = coalesce(primaryValue.x, primaryValue.y),
          partnerISO = 'W00',
          partnerDesc = "World") %>% 
   select(-primaryValue.x, -primaryValue.y, -cmdDesc.y) %>% 
-  rename(cmdDesc = cmdDesc.x)
-
-all_trade_complete_two <- all_trade_complete_two %>% 
+  rename(cmdDesc = cmdDesc.x) %>% 
   full_join(m_zero, join_by(cmdCode, flowCode, period, reporterISO)) %>%
   mutate(primaryValue = coalesce(primaryValue.x, primaryValue.y),
          partnerISO = 'W00',
@@ -354,160 +373,162 @@ all_trade_complete_two <- all_trade_complete_two %>%
   select(-primaryValue.x, -primaryValue.y, -cmdDesc.y) %>% 
   rename(cmdDesc = cmdDesc.x)
 
-# write_rds(x = all_trade_complete_two, file = 'raw_data/all_trade_b4_imputation.RDS')
+# write_rds(x = all_trade_complete_two, 
+# file = 'raw_data/all_trade_b4_imputation.RDS')
 
 ### 3.3.3 Missing count ----------------------------------------------------
-all_trade_complete_two %>% 
+all_trade_second_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
   group_by(reporterISO) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
   View()
 
-all_trade_complete_two %>% 
+gg_second_imput <- all_trade_second_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(period) %>% 
+  group_by(period, flowCode) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
   ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Segunda Imputação") +
   xlab('Ano') + ylab('Missings') +
   theme_classic() +
-  geom_line(linetype = 'dashed') +
+  geom_line(aes(linetype = flowCode)) +
   geom_point()
 
-all_trade_complete_two %>% 
+gg_second_imput
+
+gg_second_imput_iso3c <- all_trade_second_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(period, reporterISO) %>% 
+  group_by(period, reporterISO, flowCode) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
   ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Segunda Imputação") +
   facet_wrap(~factor(reporterISO, levels=c(unique(reporterISO))), drop = T, ncol = 4, scales = "free_y") +
   xlab('Ano') + ylab('Missings') +
   theme_minimal() +
-  geom_line(linewidth = 0.8) +
+  geom_line(linewidth = 0.8, aes(linetype = flowCode)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+gg_second_imput_iso3c
 
 ## 3.4 Linear interpolation --------------------------------------------------
-interpolated_trade <- all_trade_complete_two %>% 
+all_trade_third_imput <- all_trade_second_imput %>% 
+  arrange(reporterISO, period, cmdCode, flowCode) %>% 
   group_by(reporterISO, cmdCode, flowCode) %>% 
-  mutate(primaryValue = na.approx(primaryValue, na.rm=FALSE)) %>% 
+  mutate(primaryValue = na.approx(primaryValue, na.rm = FALSE)) %>% 
   ungroup()
 
-interpolated_trade %>% 
+all_trade_third_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
   group_by(reporterISO) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
   View()
 
-interpolated_trade %>% 
+gg_third_imput <- all_trade_third_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(period) %>% 
+  group_by(period, flowCode) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
   ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Terceira Imputação") +
   xlab('Ano') + ylab('Missings') +
   theme_classic() +
-  geom_line(linetype = 'dashed') +
+  geom_line(aes(linetype = flowCode)) +
   geom_point()
 
-interpolated_trade %>% 
+gg_third_imput
+
+gg_third_imput_iso3c <- all_trade_third_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(period, reporterISO) %>% 
+  group_by(period, reporterISO, flowCode) %>% 
   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
   ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Terceira Imputação") +
   facet_wrap(~factor(reporterISO, levels=c(unique(reporterISO))), drop = T, ncol = 4, scales = "free_y") +
   xlab('Ano') + ylab('Missings') +
   theme_minimal() +
-  geom_line(linewidth = 0.8) +
+  geom_line(linewidth = 0.8, aes(linetype = flowCode)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-write_rds(x = interpolated_trade, file = 'raw_data/all_trade_interpolated.RDS')
+gg_third_imput_iso3c
 
-## 3.5 Mean imputation ------------------------------------------------
-
-n <- 10
-
-mean_imputed_trade <- all_trade_complete_two %>% 
-  group_by(reporterISO, cmdCode, flowCode) %>% 
-  arrange(period) %>% 
-  group_by(reporterISO, period, flowCode) %>% 
-  mutate(cmd_share = primaryValue/primaryValue[cmdCode=='TOTAL']) %>% 
-  group_by(reporterISO, cmdCode, flowCode,
-           Group = floor((period - first(period))/n)) %>%
-  mutate(time_average = mean(cmd_share, na.rm = TRUE)) %>% 
-  ungroup()
-
-mean_imputed_trade <- all_trade_imputed %>% 
-  group_by(reporterISO, period, flowCode) %>% 
-  mutate(primaryValue = 
-           coalesce(primaryValue, 
-           primaryValue[cmdCode=='TOTAL']*time_average)) %>%
-  ungroup()
-
-mean_imputed_trade %>% 
-  filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(reporterISO) %>% 
-  summarise(sum_total_na = sum(is.na(primaryValue))) %>% View()
-
-mean_imputed_trade %>% 
-  filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(period) %>% 
-  summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
-  ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Terceira Imputação") +
-  xlab('Ano') + ylab('Missings') +
-  theme_classic() +
-  geom_line(linetype = 'dashed') +
-  geom_point()
-
-mean_imputed_trade %>% 
-  filter(reporterISO %in% latam_iso$iso3c) %>% 
-  group_by(period, reporterISO) %>% 
-  summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
-  ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Terceira Imputação") +
-  facet_wrap(~factor(reporterISO, levels=c(unique(reporterISO))), drop = T, ncol = 4, scales = "free_y") +
-  xlab('Ano') + ylab('Missings') +
-  theme_minimal() +
-  geom_line(linewidth = 0.8) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-write_rds(x = mean_imputed_trade, file = 'raw_data/all_trade_mean_imputed.RDS')
+write_rds(x = interpolated_trade, 
+          file = 'raw_data/all_trade_third_imput.RDS')
 
 ## 4. Statistics ----------------------------------------------------------
 all_trade_complete %>% 
   filter(reporterISO %in% latam_iso$iso3c,
-         flowCode == "M") %>% 
+         flowCode == "X") %>%
   summary()
 
-all_trade_complete %>% 
+all_trade_first_imput %>% 
+  filter(reporterISO %in% latam_iso$iso3c,
+         flowCode == "X") %>%
+  summary()
+
+all_trade_second_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c,
          flowCode == "X") %>% 
   summary()
 
-all_trade_complete_two %>% 
-  filter(reporterISO %in% latam_iso$iso3c,
-         flowCode == "M") %>% 
-  summary()
-
-all_trade_complete_two %>% 
+all_trade_third_imput %>% 
   filter(reporterISO %in% latam_iso$iso3c,
          flowCode == "X") %>% 
   summary()
 
-interpolated_trade %>% 
-  filter(reporterISO %in% latam_iso$iso3c,
-         flowCode == "M") %>% 
-  summary()
+gg_original
+gg_first_imput
+gg_second_imput
+gg_third_imput
 
-interpolated_trade %>% 
-  filter(reporterISO %in% latam_iso$iso3c,
-         flowCode == "X") %>% 
-  summary()
+gg_original_iso3c
+gg_first_imput_iso3c
+gg_second_imput_iso3c
+gg_third_imput_iso3c
 
-mean_imputed_trade %>% 
-  filter(reporterISO %in% latam_iso$iso3c,
-         flowCode == "M") %>% 
-  summary()
+# LEFTOVER ----------------------------------------------------------------
+# alltrade <- do.call(mapply, c("get_data", unname(as.list(vars)))) %>% 
+# list_rbind()
 
-mean_imputed_trade %>% 
-  filter(reporterISO %in% latam_iso$iso3c,
-         flowCode == "X") %>% 
-  summary()
+## 3.5 Mean imputation ------------------------------------------------
 
-# Leftovers: Might use in the future
-# alltrade <- do.call(mapply, c("get_data", unname(as.list(vars)))) %>% list_rbind()
+# n <- 10
+# 
+# mean_imputed_trade <- all_trade_complete_two %>% 
+#   group_by(reporterISO, cmdCode, flowCode) %>% 
+#   arrange(period) %>% 
+#   group_by(reporterISO, period, flowCode) %>% 
+#   mutate(cmd_share = primaryValue/primaryValue[cmdCode=='TOTAL']) %>% 
+#   group_by(reporterISO, cmdCode, flowCode,
+#            Group = floor((period - first(period))/n)) %>%
+#   mutate(time_average = mean(cmd_share, na.rm = TRUE)) %>% 
+#   ungroup()
+# 
+# mean_imputed_trade <- all_trade_imputed %>% 
+#   group_by(reporterISO, period, flowCode) %>% 
+#   mutate(primaryValue = 
+#            coalesce(primaryValue, 
+#                     primaryValue[cmdCode=='TOTAL']*time_average)) %>%
+#   ungroup()
+# 
+# mean_imputed_trade %>% 
+#   filter(reporterISO %in% latam_iso$iso3c) %>% 
+#   group_by(reporterISO) %>% 
+#   summarise(sum_total_na = sum(is.na(primaryValue))) %>% View()
+# 
+# mean_imputed_trade %>% 
+#   filter(reporterISO %in% latam_iso$iso3c) %>% 
+#   group_by(period) %>% 
+#   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
+#   ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Terceira Imputação") +
+#   xlab('Ano') + ylab('Missings') +
+#   theme_classic() +
+#   geom_line(linetype = 'dashed') +
+#   geom_point()
+# 
+# mean_imputed_trade %>% 
+#   filter(reporterISO %in% latam_iso$iso3c) %>% 
+#   group_by(period, reporterISO) %>% 
+#   summarise(sum_total_na = sum(is.na(primaryValue))) %>% 
+#   ggplot(aes(x=period, y=sum_total_na)) + ggtitle("Terceira Imputação") +
+#   facet_wrap(~factor(reporterISO, levels=c(unique(reporterISO))), drop = T, ncol = 4, scales = "free_y") +
+#   xlab('Ano') + ylab('Missings') +
+#   theme_minimal() +
+#   geom_line(linewidth = 0.8) +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# 
+# write_rds(x = mean_imputed_trade, file = 'raw_data/all_trade_mean_imputed.RDS')
